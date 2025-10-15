@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<XMLDB PATH="mod/paygw_airwallex/db" VERSION="2020080600" COMMENT="XMLDB file for Moodle paygw_airwallex plugin"
+    COLUMNS="Y" ENUMS="Y"
+    >
+    <TABLES>
+        <TABLE NAME="paygw_airwallex" COMMENT="Stores Airwallex payment intent IDs for reconciliation">
+            <FIELDS>
+                <FIELD NAME="id" TYPE="int" LENGTH="10" NOTNULL="true" UNSIGNED="true" SEQUENCE="true" />
+                <FIELD NAME="paymentid" TYPE="int" LENGTH="10" NOTNULL="true" UNSIGNED="true" DEFAULT="0" SEQUENCE="false" />
+                <FIELD NAME="intentid" TYPE="char" LENGTH="255" NOTNULL="true" SEQUENCE="false" />
+                <FIELD NAME="timecreated" TYPE="int" LENGTH="10" NOTNULL="true" UNSIGNED="true" DEFAULT="0" SEQUENCE="false" />
+                <FIELD NAME="timemodified" TYPE="int" LENGTH="10" NOTNULL="true" UNSIGNED="true" DEFAULT="0" SEQUENCE="false" />
+            </FIELDS>
+            <KEYS>
+                <KEY NAME="primary" TYPE="primary" FIELDS="id" />
+                <KEY NAME="paymentid" TYPE="foreign" FIELDS="paymentid" REFERENCE="payment" PMKEY="id" />
+                <KEY NAME="intentid" TYPE="unique" FIELDS="intentid" />
+            </KEYS>
+        </TABLE>
+    </TABLES>
+</XMLDB>
