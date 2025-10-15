@@ -15,7 +15,7 @@
 // along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
 
 /**
- * This class contains a webservice function to get configuration for Airwallex HPP.
+ * This class contains a webservice function to get configuration for Airwallex SDK-driven HPP.
  *
  * @package    paygw_airwallex
  * @copyright  2020 Shamim Rezaie <shamim@moodle.com>
@@ -45,13 +45,11 @@ class get_hpp_config extends external_api {
             'component' => new external_value(PARAM_COMPONENT, 'Component'),
             'paymentarea' => new external_value(PARAM_AREA, 'Payment area in the component'),
             'itemid' => new external_value(PARAM_INT, 'An identifier for payment area in the component'),
-            // Optionally pass a redirect base for constructing return/cancel URLs if not constant
-            // 'redirectbaseurl' => new external_value(PARAM_URL, 'Base URL for redirects to Moodle', external_value::OPTIONS_OPTIONAL),
         ]);
     }
 
     /**
-     * Returns the HPP redirect URL and payment intent ID.
+     * Returns the config values required by the Airwallex JavaScript SDK for HPP.
      *
      * @param string $component
      * @param string $paymentarea
@@ -79,25 +77,22 @@ class get_hpp_config extends external_api {
         $cost = helper::get_rounded_cost($payable->get_amount(), $payable->get_currency(), $surcharge);
         $currency = $payable->get_currency();
 
-        // Generate a unique Moodle order ID. Ensure this is unique across ALL Moodle payments.
-        // It's good practice to also save this ID in a temporary Moodle payment record before calling Airwallex.
+        // Generate a unique Moodle order ID.
         $moodleorderid = 'mdl_' . $component . '_' . $paymentarea . '_' . $itemid . '_' . time() . '_' . rand(1000, 9999);
 
         // Construct the return and cancel URLs for Airwallex to redirect back to.
-        // Ensure these URLs are publicly accessible on your Moodle site.
-        // They will typically point to a custom callback script in your plugin.
         $baseurl = new \moodle_url('/paygw_airwallex/callback.php', [
             'component' => $component,
             'paymentarea' => $paymentarea,
             'itemid' => $itemid,
-            // You might pass the $moodleorderid here as well, but Airwallex also returns its intent_id.
-            // A safer approach for the callback is to fetch details from the payment_intent_id itself.
+            // We'll pass the Airwallex payment_intent_id in the URL from their side.
+            // But we include original context for Moodle's callback logic.
         ]);
         $returnurl = $baseurl->out(false); // Get absolute URL.
-        $cancelurl = $baseurl->out(false) . '&status=cancelled'; // A simple way to signify cancellation.
+        $cancelurl = $baseurl->out(false) . '&status=cancelled'; // Custom parameter for cancellation.
 
         $sandbox = ($config->environment ?? 'sandbox') === 'sandbox';
-        $airwallexhelper = new airwallex_helper($config->clientid, $config->apikey, $config->webhooksecret ?? '', $sandbox); // Pass webhooksecret, though not used for intent creation
+        $airwallexhelper = new airwallex_helper($config->clientid, $config->apikey, $config->webhooksecret ?? '', $sandbox);
 
         $intent = $airwallexhelper->create_payment_intent(
             (float)$cost,
@@ -108,22 +103,19 @@ class get_hpp_config extends external_api {
             'Moodle payment for ' . $component . ' ' . $itemid
         );
 
-        if (empty($intent['next_action']['redirect_url'])) {
-            throw new \moodle_exception('airw_noredirecturl', 'paygw_airwallex', '', $intent);
-        }
-
-        // Before returning, it's a good idea to temporarily store the payment intent ID
-        // and the Moodle order ID in Moodle's database, linked to the user and item.
-        // This is crucial for reconciliation when the user returns via callback.php.
-        // For example, into a custom table like paygw_airwallex_intents
-        // You'd need to create a table for this (e.g., db/install.xml).
-        // For simplicity here, we assume the callback script will directly verify the intent ID.
+        // You might want to temporarily store the payment intent ID here
+        // (e.g., in mdl_paygw_airwallex table) linked to component/itemid
+        // to help with reconciliation if the callback is delayed or lost.
 
         return [
-            'payment_intent_id' => $intent['id'] ?? '',
-            'hpp_redirect_url' => $intent['next_action']['redirect_url'],
-            'cost' => $cost,
+            'client_id' => $config->clientid, // For SDK init
+            'payment_intent_id' => $intent['id'],
+            'client_secret' => $intent['client_secret'], // Crucial for SDK-driven HPP
+            'cost' => $cost, // For display if needed
             'currency' => $currency,
+            'return_url' => $returnurl, // For SDK's redirectToCheckout
+            'cancel_url' => $cancelurl, // For SDK's redirectToCheckout
+            'env' => $config->environment ?? 'sandbox', // For SDK init
         ];
     }
 
@@ -134,10 +126,14 @@ class get_hpp_config extends external_api {
      */
     public static function execute_returns(): external_single_structure {
         return new external_single_structure([
+            'client_id' => new external_value(PARAM_TEXT, 'Airwallex client ID for SDK init'),
             'payment_intent_id' => new external_value(PARAM_TEXT, 'Airwallex payment intent ID'),
-            'hpp_redirect_url' => new external_value(PARAM_URL, 'URL to redirect to Airwallex HPP'),
+            'client_secret' => new external_value(PARAM_TEXT, 'Airwallex client secret for SDK confirm'),
             'cost' => new external_value(PARAM_FLOAT, 'Cost with gateway surcharge'),
             'currency' => new external_value(PARAM_TEXT, 'Currency'),
+            'return_url' => new external_value(PARAM_URL, 'URL for successful return from HPP'),
+            'cancel_url' => new external_value(PARAM_URL, 'URL for cancellation return from HPP'),
+            'env' => new external_value(PARAM_ALPHANUMEXT, 'Airwallex environment (demo or prod)'),
         ]);
     }
 }

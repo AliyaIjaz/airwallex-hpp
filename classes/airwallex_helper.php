@@ -27,8 +27,6 @@ use curl;
 
 defined('MOODLE_INTERNAL') || die();
 
-// require_once($CFG->libdir . '/filelib.php'); // Not strictly needed for this class
-
 class airwallex_helper {
 
     /**
@@ -75,7 +73,6 @@ class airwallex_helper {
         $this->webhooksecret = $webhooksecret;
         $this->baseurl = $sandbox ? 'https://api-demo.airwallex.com' : 'https://api.airwallex.com';
 
-        // In a real application, you'd cache this token and refresh it only when expired.
         $this->token = $this->get_token();
     }
 
@@ -84,6 +81,7 @@ class airwallex_helper {
      *
      * @param string $intentid Payment intent ID.
      * @return array|null
+     * @throws \moodle_exception
      */
     public function verify_payment_intent(string $intentid): ?array {
         $location = "$this->baseurl/api/v1/pa/payment_intents/$intentid";
@@ -99,8 +97,12 @@ class airwallex_helper {
 
         $curl = new curl();
         $result = $curl->get($location, [], $options);
+        $decodedresult = json_decode($result, true);
 
-        return json_decode($result, true);
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            throw new \moodle_exception('airw_invalidjson', 'paygw_airwallex', '', $result);
+        }
+        return $decodedresult;
     }
 
     /**
@@ -121,25 +123,27 @@ class airwallex_helper {
         ];
 
         $command = json_encode([
-            'client_id' => $this->clientid, // Corrected key names as per Airwallex docs
-            'api_key' => $this->apikey,     // Corrected key names
+            'client_id' => $this->clientid,
+            'api_key' => $this->apikey,
         ]);
 
         $curl = new curl();
         $result = $curl->post($location, $command, $options);
         $result = json_decode($result, true);
 
-        // Remove the debugging line: echo '<pre>'; print_r($result); echo '</pre>'; die;
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            throw new \moodle_exception('airw_invalidjson', 'paygw_airwallex', '', $result);
+        }
+
         if (isset($result['token'])) {
             return $result['token'];
         } else {
-            // Log the error and throw an exception for clearer debugging.
             throw new \moodle_exception('airw_tokenerror', 'paygw_airwallex', '', $result);
         }
     }
 
     /**
-     * Create a payment intent for HPP.
+     * Create a payment intent.
      *
      * @param float $amount Amount to charge.
      * @param string $currency ISO currency code.
@@ -147,7 +151,7 @@ class airwallex_helper {
      * @param string $returnurl The URL where the customer is redirected after payment.
      * @param string $cancelurl The URL where the customer is redirected if they cancel.
      * @param string $description Optional description.
-     * @return array|null The PaymentIntent object, including next_action.redirect_url.
+     * @return array|null The PaymentIntent object, including 'id' and 'client_secret'.
      * @throws \moodle_exception
      */
     public function create_payment_intent(
@@ -166,37 +170,36 @@ class airwallex_helper {
             'CURLOPT_HTTPHEADER' => [
                 'Content-Type: application/json',
                 "Authorization: Bearer {$this->token}",
-                // Ensure idempotency for retries
-                'X-Request-ID: ' . \core_uuid::generate(),
+                'X-Request-ID: ' . \core_uuid::generate(), // Idempotency key
             ],
         ];
 
         $command = json_encode([
             'amount' => $amount,
             'currency' => $currency,
-            'merchant_order_id' => $merchantorderid, // Use the provided unique Moodle order ID
+            'merchant_order_id' => $merchantorderid,
             'description' => $description,
             'payment_method_options' => [
                 'hpp' => [
                     'return_url' => $returnurl,
                     'cancel_url' => $cancelurl,
-                    // Optionally, you can add more HPP settings here, e.g., 'country_code', 'locale', 'appearance'
                 ],
             ],
-            // For hosted page, you often specify it's for 'HPP' or a specific payment method upfront.
-            // Airwallex's API typically infers this from payment_method_options.hpp
-            'confirm' => false, // We will confirm later via the HPP redirect
+            'confirm' => false, // Important for HPP, SDK will confirm later
         ]);
 
         $curl = new curl();
         $result = $curl->post($location, $command, $options);
-        $result = json_decode($result, true);
+        $decodedresult = json_decode($result, true);
 
-        if (isset($result['id'])) {
-            return $result;
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            throw new \moodle_exception('airw_invalidjson', 'paygw_airwallex', '', $result);
+        }
+
+        if (isset($decodedresult['id']) && isset($decodedresult['client_secret'])) {
+            return $decodedresult;
         } else {
-            // Log error and throw exception if PaymentIntent creation fails
-            throw new \moodle_exception('airw_intentcreateerror', 'paygw_airwallex', '', $result);
+            throw new \moodle_exception('airw_intentcreateerror', 'paygw_airwallex', '', $decodedresult);
         }
     }
 
@@ -208,11 +211,15 @@ class airwallex_helper {
      * @return bool
      */
     public function verify_webhook_signature(string $signature, string $payload): bool {
-        // Airwallex webhook signature verification typically involves a timestamp and signature.
-        // The header usually looks like: t=<timestamp>,v1=<signature>
-        // Moodle's textlib and openssl functions might be useful here.
-        // This is a simplified example; a full implementation would parse the header and
-        // use hash_hmac with the webhooksecret.
+        // This is a simplified example based on common patterns.
+        // ALWAYS consult Airwallex's official documentation for exact signature verification steps.
+        // It generally involves splitting the header, hashing the timestamp.payload with your webhook_secret,
+        // and comparing it with the provided signature.
+
+        if (strpos($signature, 't=') === false || strpos($signature, 'v1=') === false) {
+            return false; // Invalid signature format
+        }
+
         list($tpart, $v1part) = explode(',', $signature);
         $timestamp = (int)str_replace('t=', '', $tpart);
         $sig = str_replace('v1=', '', $v1part);

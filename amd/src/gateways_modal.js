@@ -14,71 +14,152 @@
 //
 // Moodle is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
 //
-// You should have received a copy of the GNU General Public License
+// You should have received a copy of the GNU Public License
 // along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
 
 /**
- * This module is responsible for Airwallex content in the gateways modal for HPP.
+ * This module is responsible for Airwallex content in the gateways modal for SDK-driven HPP.
  *
  * @module     paygw_airwallex/gateways_modal
  * @copyright  2020 Shamim Rezaie <shamim@moodle.com>
  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
 
-import * as Repository from './repository'; // Your repository.js will call the new webservice
+import * as Repository from './repository';
 import Templates from 'core/templates';
 import Modal from 'core/modal';
-// import ModalEvents from 'core/modal_events'; // Not strictly needed for HPP redirect
+import Notification from 'core/notification';
 import {getString} from 'core/str';
-import Notification from 'core/notification'; // For displaying error messages
 
 /**
- * Creates and shows a modal that contains a placeholder.
+ * Creates and shows a modal that contains a placeholder/loading message.
  *
  * @returns {Promise<Modal>}
  */
-const showModalWithPlaceholder = async() => await Modal.create({
-    body: await Templates.render('paygw_airwallex/airwallex_placeholder', {}),
+const showModalWithLoading = async() => await Modal.create({
+    body: await Templates.render('paygw_airwallex/airwallex_placeholder', {
+        message: getString('airw_preparingpayment', 'paygw_airwallex') // Custom message for loading
+    }),
     show: true,
     removeOnClose: true,
 });
 
 /**
- * Process the payment by redirecting to Airwallex HPP.
+ * Dynamically loads the Airwallex Components SDK.
+ *
+ * @param {string} env The Airwallex environment ('demo' or 'prod').
+ * @param {string} clientId Airwallex client ID.
+ * @returns {Promise<object>} Resolves with the Airwallex payment object.
+ */
+const loadAirwallexComponentsSdk = (env, clientId) => {
+    const sdkUrl = 'https://checkout.airwallex.com/assets/components.bundle.min.js';
+    // Use a unique static property name to avoid conflicts if multiple SDKs are loaded
+    if (loadAirwallexComponentsSdk.currentlyloaded === sdkUrl && window.Airwallex && window.Airwallex.payment) {
+        // SDK already loaded and initialized
+        return Promise.resolve(window.Airwallex.payment);
+    }
+
+    const script = document.createElement('script');
+    return new Promise((resolve, reject) => {
+        script.onload = async function() {
+            if (window.Airwallex && typeof window.Airwallex.init === 'function') {
+                try {
+                    const { payment } = await window.Airwallex.init({
+                        env: env, // 'demo' or 'prod'
+                        client_id: clientId,
+                        // If you need specific elements (e.g., 'card'), you'd include them here.
+                        // For redirectToCheckout, 'payments' is often sufficient.
+                        enabledElements: ['payments'],
+                    });
+                    loadAirwallexComponentsSdk.currentlyloaded = sdkUrl;
+                    resolve(payment);
+                } catch (e) {
+                    console.error('Airwallex SDK init failed:', e);
+                    reject(new Error(getString('airw_sdkinitfailed', 'paygw_airwallex')));
+                }
+            } else {
+                reject(new Error(getString('airw_sdknotfound', 'paygw_airwallex')));
+            }
+        };
+        script.onerror = function() {
+            reject(new Error(getString('airw_sdkloadfailed', 'paygw_airwallex')));
+        };
+        script.setAttribute('src', sdkUrl);
+        document.head.appendChild(script);
+    });
+};
+loadAirwallexComponentsSdk.currentlyloaded = ''; // Static property to track loaded SDK
+
+/**
+ * Process the payment using Airwallex SDK redirectToCheckout for HPP.
  *
  * @param {string} component Name of the component that the itemId belongs to
  * @param {string} paymentArea The area of the component that the itemId belongs to
  * @param {number} itemId An internal identifier that is used by the component
- * @param {string} description Description of the payment (not directly used in HPP redirect, but good for context)
+ * @param {string} description Description of the payment (for logging/metadata)
  * @returns {Promise<string>}
  */
 export const process = (component, paymentArea, itemId, description) => {
-    console.log('Airwallex HPP process initiated', component, paymentArea, itemId, description);
-    let paymentModal = null; // To hold the modal instance
+    console.log('Airwallex SDK-driven HPP process initiated', component, paymentArea, itemId, description);
+    let paymentModal = null;
 
-    return showModalWithPlaceholder()
+    return showModalWithLoading()
     .then(modal => {
         paymentModal = modal;
-        // Call the webservice to get the HPP redirect URL
+        // Call the webservice to get payment intent details and HPP config
         return Repository.getHppConfig(component, paymentArea, itemId);
     })
     .then(airwallexConfig => {
-        if (!airwallexConfig.hpp_redirect_url) {
-            throw new Error(getString('airw_noredirecturl_js', 'paygw_airwallex'));
-        }
-
-        // Hide the modal before redirecting
+        // Load and initialize the Airwallex Components SDK
+        return Promise.all([
+            airwallexConfig,
+            loadAirwallexComponentsSdk(airwallexConfig.env, airwallexConfig.client_id),
+        ]);
+    })
+    .then(([airwallexConfig, paymentSdk]) => {
+        // Hide the loading modal as we're about to redirect
         if (paymentModal) {
             paymentModal.hide();
         }
 
-        // Redirect the user to the Airwallex Hosted Payment Page
-        window.location.href = airwallexConfig.hpp_redirect_url;
+        // Configure Google Pay options if desired. This example uses some from Airwallex docs.
+        const googlePayOptions = {
+            countryCode: airwallexConfig.currency.substring(0, 2), // Example: 'USD' -> 'US'
+            merchantInfo: {
+                merchantName: getString('airw_merchantname', 'paygw_airwallex'), // From lang file
+            },
+            emailRequired: true,
+            billingAddressParameters: {
+                format: 'FULL',
+                phoneNumberRequired: true
+            },
+            billingAddressRequired: true,
+            buttonType: "checkout", // Can be "book", "buy", "donate", etc.
+            buttonColor: "black",
+            buttonSizeMode: "fill"
+        };
+        // NOTE: For recurring payments, you'd add displayItems as shown in Airwallex docs.
 
-        // The Promise will not resolve until the user returns to Moodle via callback.php
-        // For the purpose of this function, we can resolve immediately if the redirect is successful.
-        // The actual payment confirmation will happen in callback.php and potentially webhook.php.
+        // Use the Airwallex SDK to redirect to their hosted payment page
+        paymentSdk.redirectToCheckout({
+            intent_id: airwallexConfig.payment_intent_id,
+            client_secret: airwallexConfig.client_secret,
+            currency: airwallexConfig.currency,
+            returnUrl: airwallexConfig.return_url,
+            cancelUrl: airwallexConfig.cancel_url,
+            // Pass Google Pay options if Google Pay is desired within the HPP
+            googlePayRequestOptions: googlePayOptions,
+            // mode: 'recurring', // If implementing subscriptions
+            // customer_id: 'your customer id', // If managing customers in Airwallex
+            // ... any other options for redirectToCheckout
+        });
+
+        // The browser will now redirect. The promise in this function
+        // will not resolve in the usual sense (the page will change).
+        // The actual payment result will be handled by callback.php.
         return Promise.resolve(getString('airw_redirecting', 'paygw_airwallex'));
     })
     .catch(err => {
@@ -92,6 +173,3 @@ export const process = (component, paymentArea, itemId, description) => {
         return Promise.reject(err.message || getString('airw_paymentinitfailed', 'paygw_airwallex'));
     });
 };
-
-// No need for loadAirwallexSdk as we are redirecting to their page.
-// No need for currentlyloaded static property.
